@@ -35,7 +35,6 @@ const guildSchema = new mongoose.Schema({
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
 
-// Schema مرنة تمنع CastError تماماً
 const backupSchema = new mongoose.Schema({
     guildId: { type: String, required: true },
     roles: Array,
@@ -43,7 +42,7 @@ const backupSchema = new mongoose.Schema({
     channels: Array
 }, { timestamps: true, strict: false });
 
-const ServerBackup = mongoose.model('CleanServerBackup', backupSchema);
+const ServerBackup = mongoose.model('FullPermissionsBackup', backupSchema);
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log('✅ MongoDB Connected')).catch(console.error);
 
@@ -71,13 +70,18 @@ const commands = [
     },
     { 
         name: 'send-dm', 
-        description: 'Send DM to a user via NA', 
-        options: [{ name: 'user', description: 'User', type: ApplicationCommandOptionType.User, required: true }, { name: 'message', description: 'Msg', type: ApplicationCommandOptionType.String, required: true }] 
+        description: 'Send DM to a user via NA (Use {user} to mention)', 
+        options: [
+            { name: 'user', description: 'Target User', type: ApplicationCommandOptionType.User, required: true }, 
+            { name: 'message', description: 'Write your message (Use {user} to mention them)', type: ApplicationCommandOptionType.String, required: true }
+        ] 
     },
     { 
         name: 'send-all', 
-        description: 'Send DM to all members via NA', 
-        options: [{ name: 'message', description: 'Msg', type: ApplicationCommandOptionType.String, required: true }] 
+        description: 'Send DM to all members via NA (Use {user} to mention)', 
+        options: [
+            { name: 'message', description: 'Write your message (Use {user} to mention them)', type: ApplicationCommandOptionType.String, required: true }
+        ] 
     },
     {
         name: 'backup',
@@ -228,35 +232,53 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.reply({ content: `✅ ${BOT_NAME} Logs channel set to${channel}`, flags: MessageFlags.Ephemeral });
         }
 
+        // ==========================================
+        // SEND-DM COMMAND
+        // ==========================================
         if (interaction.commandName === 'send-dm') {
             const user = interaction.options.getUser('user');
-            const msg = interaction.options.getString('message');
-            try {
-                await user.send(msg);
-                await interaction.reply({ content: `✅ Message sent to ${user.tag}`, flags: MessageFlags.Ephemeral });
-            } catch (err) {
-                await interaction.reply({ content: `❌ Could not send DM to ${user.tag}.`, flags: MessageFlags.Ephemeral });
-            }
-        }
+            const rawMsg = interaction.options.getString('message');
+            
+            // استبدال {user} بـ المنشن الخبير
+            const formattedMsg = rawMsg.includes('{user}') 
+                ? rawMsg.replace(/{user}/g, `<@${user.id}>`) 
+                : rawMsg;
 
-        if (interaction.commandName === 'send-all') {
-            const msg = interaction.options.getString('message');
-            const members = await interaction.guild.members.fetch();
-            let success = 0, failed = 0;
-            await interaction.reply({ content: `🚀 ${BOT_NAME} is sending messages to all members...`, flags: MessageFlags.Ephemeral });
-            for (const [id, member] of members) {
-                if (member.user.bot) continue;
-                try {
-                    await member.send(msg);
-                    success++;
-                    await new Promise(r => setTimeout(r, 1500));
-                } catch (e) { failed++; }
+            try {
+                await user.send(formattedMsg);
+                await interaction.reply({ content: `✅ Message successfully sent to ${user.tag}`, flags: MessageFlags.Ephemeral });
+            } catch (err) {
+                await interaction.reply({ content: `❌ Could not send DM to ${user.tag} (DMs are closed).`, flags: MessageFlags.Ephemeral });
             }
-            await interaction.followUp({ content: `✅ Finished!\nSent: ${success}\nFailed:${failed}`, flags: MessageFlags.Ephemeral });
         }
 
         // ==========================================
-        // FIXED BACKUP SYSTEM COMMAND
+        // SEND-ALL COMMAND
+        // ==========================================
+        if (interaction.commandName === 'send-all') {
+            const rawMsg = interaction.options.getString('message');
+            const members = await interaction.guild.members.fetch();
+            let success = 0, failed = 0;
+
+            await interaction.reply({ content: `🚀 ${BOT_NAME} is sending DMs to all server members...`, flags: MessageFlags.Ephemeral });
+            
+            for (const [id, member] of members) {
+                if (member.user.bot) continue;
+                try {
+                    const formattedMsg = rawMsg.includes('{user}') 
+                        ? rawMsg.replace(/{user}/g, `<@${member.id}>`) 
+                        : rawMsg;
+
+                    await member.send(formattedMsg);
+                    success++;
+                    await new Promise(r => setTimeout(r, 1500)); // حماية من Rate Limit
+                } catch (e) { failed++; }
+            }
+            await interaction.followUp({ content: `✅ Broadcast Finished!\nSuccess: ${success}\nFailed (Closed DMs):${failed}`, flags: MessageFlags.Ephemeral });
+        }
+
+        // ==========================================
+        // BACKUP SYSTEM COMMAND
         // ==========================================
         if (interaction.commandName === 'backup') {
             const action = interaction.options.getString('action');
@@ -264,10 +286,20 @@ client.on('interactionCreate', async (interaction) => {
             if (action === 'create') {
                 await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
-                    // استخراج الأدوار مع تحويل الصلاحيات بنص آمن
+                    const getOverwrites = (channel) => {
+                        return channel.permissionOverwrites.cache.map(ow => ({
+                            id: ow.id,
+                            type: ow.type,
+                            allow: ow.allow.bitfield.toString(),
+                            deny: ow.deny.bitfield.toString(),
+                            name: ow.type === 0 ? interaction.guild.roles.cache.get(ow.id)?.name : null
+                        }));
+                    };
+
                     const roles = interaction.guild.roles.cache
                         .filter(r => !r.managed && r.id !== interaction.guild.id)
                         .map(r => ({
+                            oldId: r.id,
                             name: r.name,
                             color: r.color,
                             permissions: r.permissions.bitfield.toString(),
@@ -276,16 +308,15 @@ client.on('interactionCreate', async (interaction) => {
                             position: r.position
                         }));
 
-                    // استخراج الفئات
                     const categories = interaction.guild.channels.cache
                         .filter(c => c.type === ChannelType.GuildCategory)
                         .map(c => ({
                             id: String(c.id),
                             name: c.name,
-                            position: c.position
+                            position: c.position,
+                            permissionOverwrites: getOverwrites(c)
                         }));
 
-                    // استخراج القنوات
                     const channels = interaction.guild.channels.cache
                         .filter(c => c.type !== ChannelType.GuildCategory)
                         .map(c => ({
@@ -294,29 +325,25 @@ client.on('interactionCreate', async (interaction) => {
                             parentId: c.parentId ? String(c.parentId) : null,
                             position: c.position,
                             topic: c.topic || '',
-                            nsfw: Boolean(c.nsfw)
+                            nsfw: Boolean(c.nsfw),
+                            permissionOverwrites: getOverwrites(c)
                         }));
-
-                    // تنظيف الحقول لتفادي التعارض ونقل البيانات بتنسيق JSON نظيف
-                    const cleanRoles = JSON.parse(JSON.stringify(roles));
-                    const cleanCategories = JSON.parse(JSON.stringify(categories));
-                    const cleanChannels = JSON.parse(JSON.stringify(channels));
 
                     await ServerBackup.findOneAndUpdate(
                         { guildId: interaction.guild.id },
                         {
                             guildId: interaction.guild.id,
-                            roles: cleanRoles,
-                            categories: cleanCategories,
-                            channels: cleanChannels
+                            roles: JSON.parse(JSON.stringify(roles)),
+                            categories: JSON.parse(JSON.stringify(categories)),
+                            channels: JSON.parse(JSON.stringify(channels))
                         },
                         { upsert: true, new: true }
                     );
 
-                    await interaction.editReply({ content: `✅ **${BOT_NAME} Backup System**: Server structure successfully saved to database!` });
+                    await interaction.editReply({ content: `✅ **${BOT_NAME} Backup System**: Server structure & channel permissions successfully saved!` });
                 } catch (err) {
                     console.error('Backup Creation Error:', err);
-                    await interaction.editReply({ content: `❌ Error while creating backup: \`${err.message}\`` });
+                    await interaction.editReply({ content: `❌ Error: \`${err.message}\`` });
                 }
             }
 
@@ -326,45 +353,73 @@ client.on('interactionCreate', async (interaction) => {
                     const backup = await ServerBackup.findOne({ guildId: interaction.guild.id });
                     if (!backup) return interaction.editReply({ content: '❌ No backup found for this server.' });
 
-                    await interaction.editReply({ content: `⚙️ **${BOT_NAME} Backup System**: Restoring server structure...` });
+                    await interaction.editReply({ content: `⚙️ **${BOT_NAME} Backup System**: Restoring server structure and permissions...` });
 
-                    // 1. مسح القنوات الحالية
-                    const currentChannels = Array.from(interaction.guild.channels.cache.values());
-                    for (const channel of currentChannels) {
+                    for (const channel of interaction.guild.channels.cache.values()) {
                         await channel.delete().catch(() => {});
                     }
 
-                    // 2. مسح الأدوار الحالية
-                    const currentRoles = Array.from(interaction.guild.roles.cache.values());
-                    for (const role of currentRoles) {
+                    for (const role of interaction.guild.roles.cache.values()) {
                         if (!role.managed && role.id !== interaction.guild.id && role.editable) {
                             await role.delete().catch(() => {});
                         }
                     }
 
-                    // 3. بناء الأدوار
+                    const roleMap = new Map();
+
                     for (const r of backup.roles) {
-                        await interaction.guild.roles.create({
+                        const createdRole = await interaction.guild.roles.create({
                             name: r.name,
                             color: r.color,
                             permissions: BigInt(r.permissions || '0'),
                             hoist: r.hoist,
                             mentionable: r.mentionable
-                        }).catch(() => {});
+                        }).catch(() => null);
+
+                        if (createdRole && r.oldId) {
+                            roleMap.set(r.oldId, createdRole.id);
+                        }
                     }
 
-                    // 4. بناء الفئات
+                    const buildPermissionOverwrites = (overwrites) => {
+                        if (!overwrites) return [];
+                        const result = [];
+                        for (const ow of overwrites) {
+                            let targetId = ow.id;
+
+                            if (ow.type === 0) {
+                                if (ow.id === interaction.guild.id) {
+                                    targetId = interaction.guild.id;
+                                } else if (roleMap.has(ow.id)) {
+                                    targetId = roleMap.get(ow.id);
+                                } else {
+                                    const matchedRole = interaction.guild.roles.cache.find(r => r.name === ow.name);
+                                    if (matchedRole) targetId = matchedRole.id;
+                                    else continue;
+                                }
+                            }
+
+                            result.push({
+                                id: targetId,
+                                type: ow.type,
+                                allow: BigInt(ow.allow || '0'),
+                                deny: BigInt(ow.deny || '0')
+                            });
+                        }
+                        return result;
+                    };
+
                     const categoryMap = new Map();
                     for (const cat of backup.categories) {
                         const createdCat = await interaction.guild.channels.create({
                             name: cat.name,
                             type: ChannelType.GuildCategory,
-                            position: cat.position
+                            position: cat.position,
+                            permissionOverwrites: buildPermissionOverwrites(cat.permissionOverwrites)
                         }).catch(() => null);
                         if (createdCat) categoryMap.set(cat.id, createdCat.id);
                     }
 
-                    // 5. بناء القنوات
                     for (const ch of backup.channels) {
                         await interaction.guild.channels.create({
                             name: ch.name,
@@ -372,14 +427,15 @@ client.on('interactionCreate', async (interaction) => {
                             parent: categoryMap.get(ch.parentId) || null,
                             position: ch.position,
                             topic: ch.topic,
-                            nsfw: ch.nsfw
+                            nsfw: ch.nsfw,
+                            permissionOverwrites: buildPermissionOverwrites(ch.permissionOverwrites)
                         }).catch(() => {});
                     }
 
-                    sendLog(interaction.guild.id, new EmbedBuilder().setTitle('🔄 BACKUP RESTORED').setDescription(`Server structure was restored by ${interaction.user.tag}`).setColor('Green'));
+                    sendLog(interaction.guild.id, new EmbedBuilder().setTitle('🔄 BACKUP RESTORED').setDescription(`Server structure & permissions restored by ${interaction.user.tag}`).setColor('Green'));
                 } catch (err) {
                     console.error('Load Backup Error:', err);
-                    await interaction.editReply({ content: `❌ Error while loading backup: \`${err.message}\`` });
+                    await interaction.editReply({ content: `❌ Error: \`${err.message}\`` });
                 }
             }
         }
