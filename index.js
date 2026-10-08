@@ -35,32 +35,15 @@ const guildSchema = new mongoose.Schema({
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
 
-// نموذج النسخ الاحتياطي (تصحيح الأنواع لتجنب CastError)
+// Schema مرنة تمنع CastError تماماً
 const backupSchema = new mongoose.Schema({
-    guildId: String,
-    roles: [{
-        name: String,
-        color: Number,
-        permissions: String,
-        hoist: Boolean,
-        mentionable: Boolean,
-        position: Number
-    }],
-    categories: [{
-        id: String,
-        name: String,
-        position: Number
-    }],
-    channels: [{
-        name: String,
-        type: Number,
-        parentId: String,
-        position: Number,
-        topic: String,
-        nsfw: Boolean
-    }]
-});
-const ServerBackup = mongoose.model('ServerBackup', backupSchema);
+    guildId: { type: String, required: true },
+    roles: Array,
+    categories: Array,
+    channels: Array
+}, { timestamps: true, strict: false });
+
+const ServerBackup = mongoose.model('CleanServerBackup', backupSchema);
 
 mongoose.connect(process.env.MONGO_URI).then(() => console.log('✅ MongoDB Connected')).catch(console.error);
 
@@ -153,7 +136,7 @@ client.on('guildMemberRemove', async (member) => {
 });
 
 // ==========================================
-// 2. ANTI-NSFW & HONEYPOT (PRIORITY: HONEYPOT)
+// 2. ANTI-NSFW & HONEYPOT
 // ==========================================
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
@@ -162,12 +145,12 @@ client.on('messageCreate', async (message) => {
     if (settings?.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
-                await message.author.send(`⚠️ **You have been caught by ${BOT_NAME} Honeypot!**\nYour account was softbanned from ${message.guild.name}.`).catch(() => {});
+                await message.author.send(`⚠️ **You have been caught by ${BOT_NAME} Honeypot!**\nYour account was softbanned from${message.guild.name}.`).catch(() => {});
                 await message.delete().catch(() => {});
                 await message.member.ban({ reason: `${BOT_NAME} Honeypot Trap` });
                 await message.guild.members.unban(message.author.id, { reason: 'Softban' });
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
-                sendLog(message.guild.id, new EmbedBuilder().setTitle('🎯 Honeypot Triggered').setDescription(`User ${message.author} fell into the ${BOT_NAME} trap.`).setColor('Orange'));
+                sendLog(message.guild.id, new EmbedBuilder().setTitle('🎯 Honeypot Triggered').setDescription(`User ${message.author} fell into the${BOT_NAME} trap.`).setColor('Orange'));
             } catch (err) { console.error(err); }
             return;
         }
@@ -206,7 +189,7 @@ client.on('channelCreate', async (channel) => {
         if (recentCreations.length > NUKE_THRESHOLD) {
             await executor.set('roles', []); 
             await executor.ban({ reason: `${BOT_NAME} Anti-Nuke` });
-            sendLog(channel.guild.id, new EmbedBuilder().setTitle('🚨 NUKE PREVENTED').setDescription(`User ${executor.tag} was banned by ${BOT_NAME}.`).setColor('DarkRed'));
+            sendLog(channel.guild.id, new EmbedBuilder().setTitle('🚨 NUKE PREVENTED').setDescription(`User ${executor.tag} was banned by${BOT_NAME}.`).setColor('DarkRed'));
         }
     } catch (err) { console.error(err); }
 });
@@ -242,7 +225,7 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.commandName === 'setlogs') {
             const channel = interaction.options.getChannel('channel');
             await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { logsChannelId: channel.id }, { upsert: true });
-            await interaction.reply({ content: `✅ ${BOT_NAME} Logs channel set to ${channel}`, flags: MessageFlags.Ephemeral });
+            await interaction.reply({ content: `✅ ${BOT_NAME} Logs channel set to${channel}`, flags: MessageFlags.Ephemeral });
         }
 
         if (interaction.commandName === 'send-dm') {
@@ -269,11 +252,11 @@ client.on('interactionCreate', async (interaction) => {
                     await new Promise(r => setTimeout(r, 1500));
                 } catch (e) { failed++; }
             }
-            await interaction.followUp({ content: `✅ Finished!\nSent: ${success}\nFailed: ${failed}`, flags: MessageFlags.Ephemeral });
+            await interaction.followUp({ content: `✅ Finished!\nSent: ${success}\nFailed:${failed}`, flags: MessageFlags.Ephemeral });
         }
 
         // ==========================================
-        // BACKUP SYSTEM COMMAND
+        // FIXED BACKUP SYSTEM COMMAND
         // ==========================================
         if (interaction.commandName === 'backup') {
             const action = interaction.options.getString('action');
@@ -281,51 +264,59 @@ client.on('interactionCreate', async (interaction) => {
             if (action === 'create') {
                 await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
-                    const rolesData = interaction.guild.roles.cache
+                    // استخراج الأدوار مع تحويل الصلاحيات بنص آمن
+                    const roles = interaction.guild.roles.cache
                         .filter(r => !r.managed && r.id !== interaction.guild.id)
                         .map(r => ({
                             name: r.name,
-                            color: Number(r.color),
+                            color: r.color,
                             permissions: r.permissions.bitfield.toString(),
-                            hoist: Boolean(r.hoist),
-                            mentionable: Boolean(r.mentionable),
-                            position: Number(r.position)
+                            hoist: r.hoist,
+                            mentionable: r.mentionable,
+                            position: r.position
                         }));
 
-                    const categoriesData = interaction.guild.channels.cache
+                    // استخراج الفئات
+                    const categories = interaction.guild.channels.cache
                         .filter(c => c.type === ChannelType.GuildCategory)
                         .map(c => ({
                             id: String(c.id),
-                            name: String(c.name),
-                            position: Number(c.position)
+                            name: c.name,
+                            position: c.position
                         }));
 
-                    const channelsData = interaction.guild.channels.cache
+                    // استخراج القنوات
+                    const channels = interaction.guild.channels.cache
                         .filter(c => c.type !== ChannelType.GuildCategory)
                         .map(c => ({
-                            name: String(c.name),
-                            type: Number(c.type),
+                            name: c.name,
+                            type: c.type,
                             parentId: c.parentId ? String(c.parentId) : null,
-                            position: Number(c.position),
-                            topic: c.topic ? String(c.topic) : '',
+                            position: c.position,
+                            topic: c.topic || '',
                             nsfw: Boolean(c.nsfw)
                         }));
+
+                    // تنظيف الحقول لتفادي التعارض ونقل البيانات بتنسيق JSON نظيف
+                    const cleanRoles = JSON.parse(JSON.stringify(roles));
+                    const cleanCategories = JSON.parse(JSON.stringify(categories));
+                    const cleanChannels = JSON.parse(JSON.stringify(channels));
 
                     await ServerBackup.findOneAndUpdate(
                         { guildId: interaction.guild.id },
                         {
                             guildId: interaction.guild.id,
-                            roles: rolesData,
-                            categories: categoriesData,
-                            channels: channelsData
+                            roles: cleanRoles,
+                            categories: cleanCategories,
+                            channels: cleanChannels
                         },
                         { upsert: true, new: true }
                     );
 
                     await interaction.editReply({ content: `✅ **${BOT_NAME} Backup System**: Server structure successfully saved to database!` });
                 } catch (err) {
-                    console.error('Backup Error:', err);
-                    await interaction.editReply({ content: '❌ Failed to create backup.' });
+                    console.error('Backup Creation Error:', err);
+                    await interaction.editReply({ content: `❌ Error while creating backup: \`${err.message}\`` });
                 }
             }
 
@@ -338,29 +329,31 @@ client.on('interactionCreate', async (interaction) => {
                     await interaction.editReply({ content: `⚙️ **${BOT_NAME} Backup System**: Restoring server structure...` });
 
                     // 1. مسح القنوات الحالية
-                    for (const channel of interaction.guild.channels.cache.values()) {
+                    const currentChannels = Array.from(interaction.guild.channels.cache.values());
+                    for (const channel of currentChannels) {
                         await channel.delete().catch(() => {});
                     }
 
-                    // 2. مسح الأدوار القديمة
-                    for (const role of interaction.guild.roles.cache.values()) {
+                    // 2. مسح الأدوار الحالية
+                    const currentRoles = Array.from(interaction.guild.roles.cache.values());
+                    for (const role of currentRoles) {
                         if (!role.managed && role.id !== interaction.guild.id && role.editable) {
                             await role.delete().catch(() => {});
                         }
                     }
 
-                    // 3. إعادة إنشاء الأدوار
+                    // 3. بناء الأدوار
                     for (const r of backup.roles) {
                         await interaction.guild.roles.create({
                             name: r.name,
                             color: r.color,
-                            permissions: BigInt(r.permissions),
+                            permissions: BigInt(r.permissions || '0'),
                             hoist: r.hoist,
                             mentionable: r.mentionable
                         }).catch(() => {});
                     }
 
-                    // 4. إعادة إنشاء الفئات
+                    // 4. بناء الفئات
                     const categoryMap = new Map();
                     for (const cat of backup.categories) {
                         const createdCat = await interaction.guild.channels.create({
@@ -371,7 +364,7 @@ client.on('interactionCreate', async (interaction) => {
                         if (createdCat) categoryMap.set(cat.id, createdCat.id);
                     }
 
-                    // 5. إعادة إنشاء القنوات
+                    // 5. بناء القنوات
                     for (const ch of backup.channels) {
                         await interaction.guild.channels.create({
                             name: ch.name,
@@ -386,6 +379,7 @@ client.on('interactionCreate', async (interaction) => {
                     sendLog(interaction.guild.id, new EmbedBuilder().setTitle('🔄 BACKUP RESTORED').setDescription(`Server structure was restored by ${interaction.user.tag}`).setColor('Green'));
                 } catch (err) {
                     console.error('Load Backup Error:', err);
+                    await interaction.editReply({ content: `❌ Error while loading backup: \`${err.message}\`` });
                 }
             }
         }
