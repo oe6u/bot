@@ -35,6 +35,15 @@ const guildSchema = new mongoose.Schema({
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
 
+// نموذج النسخ الاحتياطي
+const backupSchema = new mongoose.Schema({
+    guildId: String,
+    roles: [{ name: String, color: Number, permissions: String, hoist: Boolean, mentionable: Boolean, position: Number }],
+    categories: [{ id: String, name: String, position: Number }],
+    channels: [{ name: String, type: Number, parentId: String, position: Number, topic: String, nsfw: Boolean }]
+});
+const ServerBackup = mongoose.model('ServerBackup', backupSchema);
+
 mongoose.connect(process.env.MONGO_URI).then(() => console.log('✅ MongoDB Connected')).catch(console.error);
 
 // ==========================================
@@ -69,6 +78,22 @@ const commands = [
         description: 'Send DM to all members via NA', 
         options: [{ name: 'message', description: 'Msg', type: ApplicationCommandOptionType.String, required: true }] 
     },
+    {
+        name: 'backup',
+        description: 'Server Backup Management System',
+        options: [
+            {
+                name: 'action',
+                description: 'Select action (create or load)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    { name: 'Create Backup', value: 'create' },
+                    { name: 'Load Backup', value: 'load' }
+                ]
+            }
+        ]
+    }
 ];
 
 const registerCommands = async () => {
@@ -225,6 +250,115 @@ client.on('interactionCreate', async (interaction) => {
                 } catch (e) { failed++; }
             }
             await interaction.followUp({ content: `✅ Finished!\nSent: ${success}\nFailed: ${failed}`, ephemeral: true });
+        }
+
+        // ==========================================
+        // BACKUP SYSTEM COMMAND
+        // ==========================================
+        if (interaction.commandName === 'backup') {
+            const action = interaction.options.getString('action');
+
+            if (action === 'create') {
+                await interaction.deferReply({ ephemeral: true });
+                try {
+                    const roles = interaction.guild.roles.cache
+                        .filter(r => !r.managed && r.id !== interaction.guild.id)
+                        .map(r => ({
+                            name: r.name,
+                            color: r.color,
+                            permissions: r.permissions.bitfield.toString(),
+                            hoist: r.hoist,
+                            mentionable: r.mentionable,
+                            position: r.position
+                        }));
+
+                    const categories = interaction.guild.channels.cache
+                        .filter(c => c.type === ChannelType.GuildCategory)
+                        .map(c => ({ id: c.id, name: c.name, position: c.position }));
+
+                    const channels = interaction.guild.channels.cache
+                        .filter(c => c.type !== ChannelType.GuildCategory)
+                        .map(c => ({
+                            name: c.name,
+                            type: c.type,
+                            parentId: c.parentId,
+                            position: c.position,
+                            topic: c.topic || '',
+                            nsfw: c.nsfw || false
+                        }));
+
+                    await ServerBackup.findOneAndUpdate(
+                        { guildId: interaction.guild.id },
+                        { roles, categories, channels },
+                        { upsert: true }
+                    );
+
+                    await interaction.editReply({ content: `✅ **${BOT_NAME} Backup System**: Server structure successfully saved to database!` });
+                } catch (err) {
+                    console.error(err);
+                    await interaction.editReply({ content: '❌ Failed to create backup.' });
+                }
+            }
+
+            if (action === 'load') {
+                await interaction.deferReply({ ephemeral: true });
+                try {
+                    const backup = await ServerBackup.findOne({ guildId: interaction.guild.id });
+                    if (!backup) return interaction.editReply({ content: '❌ No backup found for this server.' });
+
+                    await interaction.editReply({ content: `⚙️ **${BOT_NAME} Backup System**: Restoring server structure...` });
+
+                    // 1. مسح جميع الرومات الحالية
+                    for (const channel of interaction.guild.channels.cache.values()) {
+                        await channel.delete().catch(() => {});
+                    }
+
+                    // 2. مسح الأدوار القديمة (الممكن مسحها)
+                    for (const role of interaction.guild.roles.cache.values()) {
+                        if (!role.managed && role.id !== interaction.guild.id && role.editable) {
+                            await role.delete().catch(() => {});
+                        }
+                    }
+
+                    // 3. إعادة إكمال الرولات
+                    for (const r of backup.roles) {
+                        await interaction.guild.roles.create({
+                            name: r.name,
+                            color: r.color,
+                            permissions: BigInt(r.permissions),
+                            hoist: r.hoist,
+                            mentionable: r.mentionable
+                        }).catch(() => {});
+                    }
+
+                    // 4. إنشاء الكاتيجوري
+                    const categoryMap = new Map();
+                    for (const cat of backup.categories) {
+                        const createdCat = await interaction.guild.channels.create({
+                            name: cat.name,
+                            type: ChannelType.GuildCategory,
+                            position: cat.position
+                        }).catch(() => null);
+                        if (createdCat) categoryMap.set(cat.id, createdCat.id);
+                    }
+
+                    // 5. إنشاء الرومات داخل الكاتيجوري المناسبة
+                    for (const ch of backup.channels) {
+                        await interaction.guild.channels.create({
+                            name: ch.name,
+                            type: ch.type,
+                            parent: categoryMap.get(ch.parentId) || null,
+                            position: ch.position,
+                            topic: ch.topic,
+                            nsfw: ch.nsfw
+                        }).catch(() => {});
+                    }
+
+                    sendLog(interaction.guild.id, new EmbedBuilder().setTitle('🔄 BACKUP RESTORED').setDescription(`Server structure was restored by ${interaction.user.tag}`).setColor('Green'));
+                } catch (err) {
+                    console.error(err);
+                }
+            }
         }
     } else if (interaction.isButton()) {
         if (interaction.customId === 'view_stats') {
