@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, AuditLogEvent, REST, Routes, ApplicationCommandOptionType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, AuditLogEvent, REST, Routes, ApplicationCommandOptionType, MessageFlags } = require('discord.js');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
@@ -35,12 +35,30 @@ const guildSchema = new mongoose.Schema({
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
 
-// نموذج النسخ الاحتياطي
+// نموذج النسخ الاحتياطي (تصحيح الأنواع لتجنب CastError)
 const backupSchema = new mongoose.Schema({
     guildId: String,
-    roles: [{ name: String, color: Number, permissions: String, hoist: Boolean, mentionable: Boolean, position: Number }],
-    categories: [{ id: String, name: String, position: Number }],
-    channels: [{ name: String, type: Number, parentId: String, position: Number, topic: String, nsfw: Boolean }]
+    roles: [{
+        name: String,
+        color: Number,
+        permissions: String,
+        hoist: Boolean,
+        mentionable: Boolean,
+        position: Number
+    }],
+    categories: [{
+        id: String,
+        name: String,
+        position: Number
+    }],
+    channels: [{
+        name: String,
+        type: Number,
+        parentId: String,
+        position: Number,
+        topic: String,
+        nsfw: Boolean
+    }]
 });
 const ServerBackup = mongoose.model('ServerBackup', backupSchema);
 
@@ -198,7 +216,9 @@ client.on('channelCreate', async (channel) => {
 // ==========================================
 client.on('interactionCreate', async (interaction) => {
     if (interaction.isChatInputCommand()) {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        }
 
         if (interaction.commandName === 'setup') {
             try {
@@ -215,14 +235,14 @@ client.on('interactionCreate', async (interaction) => {
                 );
 
                 await trapChannel.send({ embeds: [setupEmbed], components: [row] });
-                await interaction.reply({ content: `✅ ${BOT_NAME} Setup complete!`, ephemeral: true });
-            } catch (err) { interaction.reply({ content: '❌ Error.', ephemeral: true }); }
+                await interaction.reply({ content: `✅ ${BOT_NAME} Setup complete!`, flags: MessageFlags.Ephemeral });
+            } catch (err) { interaction.reply({ content: '❌ Error.', flags: MessageFlags.Ephemeral }); }
         }
 
         if (interaction.commandName === 'setlogs') {
             const channel = interaction.options.getChannel('channel');
             await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { logsChannelId: channel.id }, { upsert: true });
-            await interaction.reply({ content: `✅ ${BOT_NAME} Logs channel set to ${channel}`, ephemeral: true });
+            await interaction.reply({ content: `✅ ${BOT_NAME} Logs channel set to ${channel}`, flags: MessageFlags.Ephemeral });
         }
 
         if (interaction.commandName === 'send-dm') {
@@ -230,9 +250,9 @@ client.on('interactionCreate', async (interaction) => {
             const msg = interaction.options.getString('message');
             try {
                 await user.send(msg);
-                await interaction.reply({ content: `✅ Message sent to ${user.tag}`, ephemeral: true });
+                await interaction.reply({ content: `✅ Message sent to ${user.tag}`, flags: MessageFlags.Ephemeral });
             } catch (err) {
-                await interaction.reply({ content: `❌ Could not send DM to ${user.tag}.`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not send DM to ${user.tag}.`, flags: MessageFlags.Ephemeral });
             }
         }
 
@@ -240,7 +260,7 @@ client.on('interactionCreate', async (interaction) => {
             const msg = interaction.options.getString('message');
             const members = await interaction.guild.members.fetch();
             let success = 0, failed = 0;
-            await interaction.reply({ content: `🚀 ${BOT_NAME} is sending messages to all members...`, ephemeral: true });
+            await interaction.reply({ content: `🚀 ${BOT_NAME} is sending messages to all members...`, flags: MessageFlags.Ephemeral });
             for (const [id, member] of members) {
                 if (member.user.bot) continue;
                 try {
@@ -249,7 +269,7 @@ client.on('interactionCreate', async (interaction) => {
                     await new Promise(r => setTimeout(r, 1500));
                 } catch (e) { failed++; }
             }
-            await interaction.followUp({ content: `✅ Finished!\nSent: ${success}\nFailed: ${failed}`, ephemeral: true });
+            await interaction.followUp({ content: `✅ Finished!\nSent: ${success}\nFailed: ${failed}`, flags: MessageFlags.Ephemeral });
         }
 
         // ==========================================
@@ -259,68 +279,77 @@ client.on('interactionCreate', async (interaction) => {
             const action = interaction.options.getString('action');
 
             if (action === 'create') {
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
-                    const roles = interaction.guild.roles.cache
+                    const rolesData = interaction.guild.roles.cache
                         .filter(r => !r.managed && r.id !== interaction.guild.id)
                         .map(r => ({
                             name: r.name,
-                            color: r.color,
+                            color: Number(r.color),
                             permissions: r.permissions.bitfield.toString(),
-                            hoist: r.hoist,
-                            mentionable: r.mentionable,
-                            position: r.position
+                            hoist: Boolean(r.hoist),
+                            mentionable: Boolean(r.mentionable),
+                            position: Number(r.position)
                         }));
 
-                    const categories = interaction.guild.channels.cache
+                    const categoriesData = interaction.guild.channels.cache
                         .filter(c => c.type === ChannelType.GuildCategory)
-                        .map(c => ({ id: c.id, name: c.name, position: c.position }));
+                        .map(c => ({
+                            id: String(c.id),
+                            name: String(c.name),
+                            position: Number(c.position)
+                        }));
 
-                    const channels = interaction.guild.channels.cache
+                    const channelsData = interaction.guild.channels.cache
                         .filter(c => c.type !== ChannelType.GuildCategory)
                         .map(c => ({
-                            name: c.name,
-                            type: c.type,
-                            parentId: c.parentId,
-                            position: c.position,
-                            topic: c.topic || '',
-                            nsfw: c.nsfw || false
+                            name: String(c.name),
+                            type: Number(c.type),
+                            parentId: c.parentId ? String(c.parentId) : null,
+                            position: Number(c.position),
+                            topic: c.topic ? String(c.topic) : '',
+                            nsfw: Boolean(c.nsfw)
                         }));
 
                     await ServerBackup.findOneAndUpdate(
                         { guildId: interaction.guild.id },
-                        { roles, categories, channels },
-                        { upsert: true }
+                        {
+                            guildId: interaction.guild.id,
+                            roles: rolesData,
+                            categories: categoriesData,
+                            channels: channelsData
+                        },
+                        { upsert: true, new: true }
                     );
 
                     await interaction.editReply({ content: `✅ **${BOT_NAME} Backup System**: Server structure successfully saved to database!` });
                 } catch (err) {
-                    console.error(err);
+                    console.error('Backup Error:', err);
                     await interaction.editReply({ content: '❌ Failed to create backup.' });
                 }
             }
 
             if (action === 'load') {
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 try {
                     const backup = await ServerBackup.findOne({ guildId: interaction.guild.id });
                     if (!backup) return interaction.editReply({ content: '❌ No backup found for this server.' });
 
                     await interaction.editReply({ content: `⚙️ **${BOT_NAME} Backup System**: Restoring server structure...` });
 
-                    // 1. مسح جميع الرومات الحالية
+                    // 1. مسح القنوات الحالية
                     for (const channel of interaction.guild.channels.cache.values()) {
                         await channel.delete().catch(() => {});
                     }
 
-                    // 2. مسح الأدوار القديمة (الممكن مسحها)
+                    // 2. مسح الأدوار القديمة
                     for (const role of interaction.guild.roles.cache.values()) {
                         if (!role.managed && role.id !== interaction.guild.id && role.editable) {
                             await role.delete().catch(() => {});
                         }
                     }
 
-                    // 3. إعادة إكمال الرولات
+                    // 3. إعادة إنشاء الأدوار
                     for (const r of backup.roles) {
                         await interaction.guild.roles.create({
                             name: r.name,
@@ -331,7 +360,7 @@ client.on('interactionCreate', async (interaction) => {
                         }).catch(() => {});
                     }
 
-                    // 4. إنشاء الكاتيجوري
+                    // 4. إعادة إنشاء الفئات
                     const categoryMap = new Map();
                     for (const cat of backup.categories) {
                         const createdCat = await interaction.guild.channels.create({
@@ -342,7 +371,7 @@ client.on('interactionCreate', async (interaction) => {
                         if (createdCat) categoryMap.set(cat.id, createdCat.id);
                     }
 
-                    // 5. إنشاء الرومات داخل الكاتيجوري المناسبة
+                    // 5. إعادة إنشاء القنوات
                     for (const ch of backup.channels) {
                         await interaction.guild.channels.create({
                             name: ch.name,
@@ -356,7 +385,7 @@ client.on('interactionCreate', async (interaction) => {
 
                     sendLog(interaction.guild.id, new EmbedBuilder().setTitle('🔄 BACKUP RESTORED').setDescription(`Server structure was restored by ${interaction.user.tag}`).setColor('Green'));
                 } catch (err) {
-                    console.error(err);
+                    console.error('Load Backup Error:', err);
                 }
             }
         }
@@ -365,7 +394,7 @@ client.on('interactionCreate', async (interaction) => {
             const settings = await GuildSettings.findOne({ guildId: interaction.guild.id });
             const count = settings ? settings.softbanCount : 0;
             const statsEmbed = new EmbedBuilder().setTitle(`📊 ${BOT_NAME} Honeypot Stats`).setDescription(`Total caught: **${count}**`).setColor('Blue').setFooter({ text: `Powered by ${BOT_NAME}` });
-            await interaction.reply({ embeds: [statsEmbed], ephemeral: true });
+            await interaction.reply({ embeds: [statsEmbed], flags: MessageFlags.Ephemeral });
         }
     }
 });
